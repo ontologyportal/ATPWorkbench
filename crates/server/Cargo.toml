@@ -1,0 +1,14 @@
+[package]
+name = "atp-server"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+atp-core = { path = "../core" }
+atp-runner = { path = "../runner" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+axum = "0.8"
+uuid = { version = "1", features = ["v4"] }
+tower-http = { version = "0.6", features = ["fs"] }
+sha2 = "0.10"

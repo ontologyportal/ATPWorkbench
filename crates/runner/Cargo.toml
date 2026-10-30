@@ -1,0 +1,8 @@
+[package]
+name = "atp-runner"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+atp-core = { path = "../core" }
+tokio.workspace = true
+nix = { version = "0.30", features = ["signal", "process"] }
