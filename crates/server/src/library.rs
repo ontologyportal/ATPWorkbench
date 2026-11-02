@@ -14,6 +14,7 @@ pub struct Library {
     root: PathBuf,
     version: String,
     entries: Vec<Entry>,
+    by_id: BTreeMap<String, usize>,
     domains: BTreeMap<String, usize>,
     formats: BTreeMap<String, usize>,
 }
@@ -82,7 +83,13 @@ impl Library {
             .ok()
             .and_then(|s| s.lines().next().map(str::to_owned))
             .unwrap_or_else(|| "Local TPTP library".into());
+        let by_id = entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.id.clone(), i))
+            .collect();
         Ok(Some(Self {
+            by_id,
             root,
             version,
             entries,
@@ -112,56 +119,48 @@ impl Library {
             }
         }
     }
+    pub fn reference(&self, id: &str) -> Result<Problem, String> {
+        let entry = self
+            .by_id
+            .get(id)
+            .and_then(|&i| self.entries.get(i))
+            .ok_or("Unknown library problem")?;
+        Ok(Problem {
+            name: entry.name.clone(),
+            content: String::new(),
+            expected: "Unknown".into(),
+            source: Some(format!("{} / {}", self.version, id)),
+            library_id: Some(id.into()),
+        })
+    }
+    /// Read just the next input when the worker is ready, never the whole suite.
+    pub fn load(&self, id: &str) -> Result<Problem, String> {
+        let mut problem = self.reference(id)?;
+        let path = tptp::confined(&self.root, id)?;
+        let mut header = String::new();
+        std::fs::File::open(path)
+            .map_err(|e| e.to_string())?
+            .take(32768)
+            .read_to_string(&mut header)
+            .map_err(|e| e.to_string())?;
+        let status = tptp::header(&header, "Status").unwrap_or_else(|| "Unknown".into());
+        problem.expected = if atp_core::definitive(&status) {
+            status
+        } else {
+            "Unknown".into()
+        };
+        problem.content = tptp::expand(&self.root, id, 64 * 1024 * 1024)?;
+        Ok(problem)
+    }
     fn import(&self, ids: Vec<String>) -> Result<Vec<Problem>, String> {
-        if ids.is_empty() || ids.len() > 100 {
-            return Err("Select 1-100 library problems".into());
+        if ids.is_empty() {
+            return Err("Select at least one library problem".into());
         }
-        let mut unique = std::collections::HashSet::new();
-        let mut total = 0;
-        let mut problems = Vec::new();
-        for id in ids {
-            if !unique.insert(id.clone()) {
-                continue;
-            }
-            let entry = self
-                .entries
-                .iter()
-                .find(|e| e.id == id)
-                .ok_or("Unknown library problem")?;
-            let path = tptp::confined(&self.root, &id)?;
-            let original = std::fs::File::open(path).map_err(|e| e.to_string())?;
-            let mut header = String::new();
-            original
-                .take(32768)
-                .read_to_string(&mut header)
-                .map_err(|e| e.to_string())?;
-            let expected = tptp::header(&header, "Status").unwrap_or_else(|| "Unknown".into());
-            let expected = if [
-                "Theorem",
-                "Unsatisfiable",
-                "Satisfiable",
-                "CounterSatisfiable",
-            ]
-            .contains(&expected.as_str())
-            {
-                expected
-            } else {
-                "Unknown".into()
-            };
-            let content = tptp::expand(&self.root, &id, 1024 * 1024)
-                .map_err(|e| format!("{}: {e}", entry.name))?;
-            total += content.len();
-            if total > 8 * 1024 * 1024 {
-                return Err("Import exceeds the 8 MB batch limit; select fewer problems".into());
-            }
-            problems.push(Problem {
-                name: entry.name.clone(),
-                content,
-                expected,
-                source: Some(format!("{} / {}", self.version, id)),
-            });
-        }
-        Ok(problems)
+        let mut seen = std::collections::HashSet::new();
+        ids.into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .map(|id| self.reference(&id))
+            .collect()
     }
 }
 #[derive(Default, Deserialize)]
@@ -194,6 +193,20 @@ pub async fn info(State(app): State<App>) -> Json<Value> {
         Some(l) => l.info(),
         None => json!({"available":false,"error":app.library_error}),
     })
+}
+/// Lightweight directory index; metadata is still loaded one page at a time.
+pub async fn tree(State(app): State<App>) -> Result<Json<Value>, ApiError> {
+    let library = get(&app)?;
+    let mut directories: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
+    for entry in &library.entries {
+        directories
+            .entry(&entry.domain)
+            .or_default()
+            .push(json!({"id":entry.id,"name":entry.name,"format":entry.format}));
+    }
+    Ok(Json(
+        json!({"directories":directories.into_iter().map(|(name,problems)|json!({"id":format!("Problems/{name}"),"name":name,"problems":problems})).collect::<Vec<_>>()}),
+    ))
 }
 pub async fn search(
     State(app): State<App>,
@@ -233,4 +246,20 @@ pub async fn import(
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .map(|p| Json(json!({"problems":p})))
         .map_err(|e| error(StatusCode::BAD_REQUEST, e))
+}
+
+pub async fn preview(
+    State(app): State<App>,
+    Json(request): Json<Preview>,
+) -> Result<Json<Problem>, ApiError> {
+    let library = get(&app)?;
+    tokio::task::spawn_blocking(move || library.load(&request.id))
+        .await
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map(Json)
+        .map_err(|e| error(StatusCode::BAD_REQUEST, e))
+}
+#[derive(Deserialize)]
+pub struct Preview {
+    id: String,
 }

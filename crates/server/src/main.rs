@@ -1,6 +1,7 @@
+mod jobs;
 mod library;
 use atp_core::{Problem, ResultRow, standings};
-use atp_runner::{execute, local_provers};
+use atp_runner::{Prover, discover_provers, execute};
 use axum::{
     Json, Router,
     extract::{Path, Request, State},
@@ -29,6 +30,7 @@ fn error(code: StatusCode, message: impl ToString) -> ApiError {
 }
 #[derive(Clone)]
 struct App {
+    provers: Arc<Vec<Prover>>,
     root: PathBuf,
     library: Option<Arc<library::Library>>,
     library_error: Option<String>,
@@ -38,6 +40,10 @@ struct App {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Batch {
+    #[serde(default)]
+    storage_version: usize,
+    #[serde(skip)]
+    current_execution: Option<jobs::CurrentExecution>,
     id: String,
     name: String,
     created: u64,
@@ -57,25 +63,6 @@ struct Submission {
     problems: Vec<Problem>,
     provers: Vec<String>,
 }
-fn snapshot(app: &App, batch: &Batch) -> Result<(), String> {
-    let path = app
-        .root
-        .join("data/runs")
-        .join(&batch.id)
-        .join("batch.json");
-    let tmp = path.with_extension("tmp");
-    std::fs::write(
-        &tmp,
-        serde_json::to_vec_pretty(batch).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::rename(tmp, path).map_err(|e| e.to_string())?;
-    app.batches
-        .lock()
-        .map_err(|e| e.to_string())?
-        .insert(batch.id.clone(), batch.clone());
-    Ok(())
-}
 fn find(app: &App, id: &str) -> Result<Batch, ApiError> {
     Uuid::parse_str(id).map_err(|_| error(StatusCode::BAD_REQUEST, "Invalid batch ID"))?;
     app.batches
@@ -87,11 +74,12 @@ fn find(app: &App, id: &str) -> Result<Batch, ApiError> {
 }
 async fn loopback(request: Request, next: Next) -> Response {
     let h = request.headers();
+    let port = std::env::var("ATP_PORT").unwrap_or_else(|_| "7878".into());
     let allowed = [
-        "localhost:7878",
-        "127.0.0.1:7878",
-        "localhost:5173",
-        "127.0.0.1:5173",
+        format!("localhost:{port}"),
+        format!("127.0.0.1:{port}"),
+        "localhost:5173".into(),
+        "127.0.0.1:5173".into(),
     ];
     let host = h
         .get(header::HOST)
@@ -101,13 +89,13 @@ async fn loopback(request: Request, next: Next) -> Response {
         v.to_str()
             .is_ok_and(|o| allowed.iter().any(|host| o == format!("http://{host}")))
     });
-    if !allowed.contains(&host) || !origin_ok {
+    if !allowed.iter().any(|allowed| allowed == host) || !origin_ok {
         return error(StatusCode::FORBIDDEN, "Local requests only").into_response();
     }
     next.run(request).await
 }
-async fn provers() -> Json<Value> {
-    Json(json!(local_provers().iter().map(|p|json!({"id":p.id,"name":p.name,"version":p.version,"installed":p.executable.is_file(),"executable":p.executable,"exact_catalogue_verified":false})).collect::<Vec<_>>() ))
+async fn provers(State(app): State<App>) -> Json<Value> {
+    Json(json!(app.provers.iter().map(|p|json!({"id":p.id,"name":p.name,"version":p.version,"installed":p.is_available(),"availability_error":p.unavailable_reason,"executable":p.executable,"exact_catalogue_verified":false})).collect::<Vec<_>>() ))
 }
 async fn list(State(app): State<App>) -> Result<Json<Value>, ApiError> {
     let batches = app
@@ -118,26 +106,23 @@ async fn list(State(app): State<App>) -> Result<Json<Value>, ApiError> {
     values.sort_by_key(|v| std::cmp::Reverse(v["created"].as_u64()));
     Ok(Json(json!(values)))
 }
-async fn detail(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
-    let batch = find(&app, &id)?;
-    Ok(Json(
-        json!({"standings":standings(&batch.results,&batch.provers),"batch":batch}),
-    ))
-}
-fn validate(s: &Submission) -> Result<(), String> {
+fn validate(s: &Submission, known: &[Prover]) -> Result<(), String> {
     if s.name.trim().is_empty() || s.name.len() > 120 {
         return Err("Suite name must be 1-120 characters".into());
     }
     if !(1..=300).contains(&s.seconds) {
         return Err("Time limit must be 1-300 seconds".into());
     }
-    if s.problems.is_empty() || s.problems.len() > 100 {
-        return Err("Use 1-100 problems".into());
+    if s.problems.is_empty() {
+        return Err("Select at least one problem".into());
     }
     let mut names = HashSet::new();
     for p in &s.problems {
         if p.name.trim().is_empty() || p.name.len() > 160 || !names.insert(&p.name) {
             return Err("Problem names must be nonempty and unique".into());
+        }
+        if p.library_id.is_some() {
+            continue;
         }
         if p.content.trim().is_empty() || p.content.len() > 1024 * 1024 {
             return Err("Each problem must contain 1 byte to 1 MB of input".into());
@@ -157,12 +142,11 @@ fn validate(s: &Submission) -> Result<(), String> {
             return Err("Invalid expected SZS status".into());
         }
     }
-    let known = local_provers();
     let mut ids = HashSet::new();
     if s.provers.is_empty()
-        || s.provers.iter().any(|id| {
-            !ids.insert(id) || !known.iter().any(|p| &p.id == id && p.executable.is_file())
-        })
+        || s.provers
+            .iter()
+            .any(|id| !ids.insert(id) || !known.iter().any(|p| &p.id == id && p.is_available()))
     {
         return Err("Select installed provers with no duplicates".into());
     }
@@ -170,9 +154,19 @@ fn validate(s: &Submission) -> Result<(), String> {
 }
 async fn submit(
     State(app): State<App>,
-    Json(s): Json<Submission>,
+    Json(mut s): Json<Submission>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    validate(&s).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    for problem in &mut s.problems {
+        if let Some(id) = &problem.library_id {
+            *problem = app
+                .library
+                .as_ref()
+                .ok_or_else(|| error(StatusCode::SERVICE_UNAVAILABLE, "Library unavailable"))?
+                .reference(id)
+                .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+        }
+    }
+    validate(&s, &app.provers).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
     if app
         .active
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -187,12 +181,16 @@ async fn submit(
         app.active.store(false, Ordering::SeqCst);
         return Err(error(StatusCode::INTERNAL_SERVER_ERROR, e));
     }
-    let selected: Vec<_> = local_provers()
-        .into_iter()
+    let selected: Vec<_> = app
+        .provers
+        .iter()
+        .cloned()
         .filter(|p| s.provers.contains(&p.id))
         .collect();
-    let manifest = json!({"provers":selected.iter().map(|p|json!({"id":p.id,"version":p.version,"executable":p.executable,"arguments":p.args})).collect::<Vec<_>>(),"inputs":s.problems.iter().map(|p|json!({"name":p.name,"source":p.source,"sha256":format!("{:x}",Sha256::digest(p.content.as_bytes()))})).collect::<Vec<_>>(),"platform":std::env::consts::OS,"architecture":std::env::consts::ARCH,"timing":"GNU time CPU user+system, process wall, peak RSS","proof_validation":"not implemented","ranking":"expected-status matches, then average matching CPU, then wall","execution":"sequential local subprocesses"});
-    let mut batch = Batch {
+    let manifest = json!({"provers":selected.iter().map(|p|json!({"id":p.id,"version":p.version,"executable":p.executable,"arguments":p.args,"environment":p.env})).collect::<Vec<_>>(),"inputs":s.problems.iter().filter(|p|p.library_id.is_none()).map(|p|json!({"name":p.name,"source":p.source,"sha256":format!("{:x}",Sha256::digest(p.content.as_bytes()))})).collect::<Vec<_>>(),"platform":std::env::consts::OS,"architecture":std::env::consts::ARCH,"timing":"GNU time CPU user+system, process wall, peak RSS","proof_validation":"not implemented","ranking":"expected-status matches, then average matching CPU, then wall","execution":"sequential local subprocesses, one input loaded at a time","input_batch_size":1,"input_snapshots":"inputs.jsonl","library_input_limit_bytes":64*1024*1024});
+    let batch = Batch {
+        storage_version: 1,
+        current_execution: None,
         id: id.clone(),
         name: s.name,
         created: SystemTime::now()
@@ -208,46 +206,18 @@ async fn submit(
         results: vec![],
         error: None,
     };
-    if let Err(e) = snapshot(&app, &batch) {
+    if let Err(e) = std::fs::create_dir_all(folder.join("inputs"))
+        .map_err(|e| e.to_string())
+        .and_then(|_| jobs::header(&app.root, &batch))
+    {
         app.active.store(false, Ordering::SeqCst);
         return Err(error(StatusCode::INTERNAL_SERVER_ERROR, e));
     }
-    tokio::spawn(async move {
-        'suite: for problem in batch.problems.clone() {
-            for prover in &selected {
-                if app.cancel.load(Ordering::Relaxed) {
-                    break 'suite;
-                }
-                batch.results.push(
-                    execute(
-                        prover,
-                        &problem,
-                        batch.seconds,
-                        &folder,
-                        batch.results.len(),
-                        app.cancel.clone(),
-                    )
-                    .await,
-                );
-                if let Err(e) = snapshot(&app, &batch) {
-                    batch.error = Some(e);
-                    break 'suite;
-                }
-            }
-        }
-        batch.state = if batch.error.is_some() {
-            "failed"
-        } else if app.cancel.load(Ordering::Relaxed) {
-            "cancelled"
-        } else {
-            "finished"
-        }
-        .into();
-        if let Err(e) = snapshot(&app, &batch) {
-            eprintln!("Failed to save batch: {e}");
-        }
-        app.active.store(false, Ordering::SeqCst);
-    });
+    app.batches
+        .lock()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "State unavailable"))?
+        .insert(id.clone(), batch.clone());
+    tokio::spawn(jobs::worker(app, batch, selected));
     Ok((StatusCode::ACCEPTED, Json(json!({"id":id}))))
 }
 async fn cancel(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
@@ -314,7 +284,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let runs = root.join("data/runs");
+    let storage_root = std::env::var_os("ATP_STORAGE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.clone());
+    let runs = storage_root.join("data/runs");
     std::fs::create_dir_all(&runs)?;
     let mut batches = BTreeMap::new();
     for entry in std::fs::read_dir(&runs)? {
@@ -322,6 +295,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(bytes) = std::fs::read(&path)
             && let Ok(mut b) = serde_json::from_slice::<Batch>(&bytes)
         {
+            if let Err(e) = jobs::restore(path.parent().ok_or("Missing run directory")?, &mut b) {
+                eprintln!("Cannot restore job {}: {e}", b.id);
+                b.state = "failed".into();
+                b.error = Some(e);
+            }
             if b.state == "running" {
                 b.state = "interrupted".into();
                 std::fs::write(path, serde_json::to_vec_pretty(&b)?)?;
@@ -336,10 +314,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             (None, Some(e))
         }
     };
+    let configured_provers = discover_provers().await;
     let app = App {
+        provers: Arc::new(configured_provers),
         library,
         library_error,
-        root: root.clone(),
+        root: storage_root,
         batches: Arc::new(Mutex::new(batches)),
         active: Arc::new(AtomicBool::new(false)),
         cancel: Arc::new(AtomicBool::new(false)),
@@ -352,11 +332,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(|| async { Json(json!({"status":"ok","execution":"local"})) }),
         )
         .route("/api/library", get(library::info))
+        .route("/api/library/tree", get(library::tree))
         .route("/api/library/problems", get(library::search))
         .route("/api/library/import", post(library::import))
+        .route("/api/library/preview", post(library::preview))
         .route("/api/provers", get(provers))
         .route("/api/batches", get(list).post(submit))
-        .route("/api/batches/{id}", get(detail))
+        .route("/api/batches/{id}", get(jobs::view))
+        .route("/api/batches/{id}/export.json", get(jobs::export_json))
+        .route("/api/batches/{id}/input/{index}", get(jobs::input))
         .route("/api/batches/{id}/cancel", post(cancel))
         .route("/api/batches/{id}/output/{index}", get(output))
         .route("/api/batches/{id}/export.csv", get(export))
@@ -366,8 +350,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .layer(middleware::from_fn(loopback))
         .with_state(app);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:7878").await?;
-    println!("ATPWorkbench: http://localhost:7878 (Vite development: http://localhost:5173)");
+    let port = std::env::var("ATP_PORT")
+        .unwrap_or_else(|_| "7878".into())
+        .parse::<u16>()?;
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+    println!("ATPWorkbench: http://localhost:{port} (Vite development: http://localhost:5173)");
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
@@ -393,11 +380,12 @@ mod tests {
                 content: "fof(a,axiom,p).".into(),
                 expected: "Theorem".into(),
                 source: None,
+                library_id: None,
             }],
         };
-        assert!(validate(&s).is_err());
+        assert!(validate(&s, &atp_runner::local_provers()).is_err());
         s.seconds = 5;
         s.problems[0].content = "include('secret').".into();
-        assert!(validate(&s).is_err());
+        assert!(validate(&s, &atp_runner::local_provers()).is_err());
     }
 }

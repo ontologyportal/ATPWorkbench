@@ -9,6 +9,8 @@ pub struct Problem {
     pub expected: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -74,6 +76,10 @@ pub struct Standing {
 /// Rank expected-status matches, then average CPU time, then wall time.
 /// Proof/model acceptance is not implied by a matching status.
 pub fn standings(rows: &[ResultRow], provers: &[String]) -> Vec<Standing> {
+    let mut match_counts = std::collections::HashMap::new();
+    for row in rows.iter().filter(|r| r.matched()) {
+        *match_counts.entry(row.problem.as_str()).or_insert(0usize) += 1;
+    }
     let mut result: Vec<_> = provers
         .iter()
         .map(|prover| {
@@ -85,11 +91,7 @@ pub fn standings(rows: &[ResultRow], provers: &[String]) -> Vec<Standing> {
             };
             let counts: Vec<_> = matches
                 .iter()
-                .map(|r| {
-                    rows.iter()
-                        .filter(|other| other.problem == r.problem && other.matched())
-                        .count()
-                })
+                .map(|r| *match_counts.get(r.problem.as_str()).unwrap_or(&0))
                 .collect();
             let contributions: Vec<_> = counts
                 .iter()

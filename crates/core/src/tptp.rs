@@ -206,7 +206,7 @@ pub fn expand(root: &Path, id: &str, max_bytes: usize) -> Result<String, String>
         .map(|(_, formula)| formula + "\n")
         .collect::<String>();
     if result.len() > max_bytes {
-        return Err("Expanded problem exceeds the 1 MB import limit".into());
+        return Err("Expanded problem exceeds the input byte limit".into());
     }
     Ok(result)
 }
@@ -223,7 +223,7 @@ fn expand_file(
     let length = std::fs::metadata(file).map_err(|e| e.to_string())?.len() as usize;
     *used = used.checked_add(length).ok_or("Include size overflow")?;
     if *used > max {
-        return Err("Problem and included axioms exceed the 1 MB import limit".into());
+        return Err("Problem and included axioms exceed the input byte limit".into());
     }
     let text = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
     stack.push(file.to_path_buf());

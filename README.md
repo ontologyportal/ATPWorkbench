@@ -118,16 +118,33 @@ npm run build:web
 
 - GET `/api/health`, `/api/provers`, `/api/batches`
 - POST `/api/batches`: `{name, seconds, problems: [{name, content, expected}], provers: [ids]}`
-- GET `/api/batches/{id}`: batch plus computed standings
+- GET `/api/batches/{id}`: initial job details, paginated results and whole-job standings; `?compact=true&offset=100` omits descriptors and selects a result page
 - POST `/api/batches/{id}/cancel`
 - GET `/api/batches/{id}/output/{index}`
-- GET `/api/batches/{id}/export.csv`
+- GET `/api/batches/{id}/export.csv`, `/api/batches/{id}/export.json`
+- GET `/api/batches/{id}/input/{index}`
+- POST `/api/library/import`: `{ids: [...]}` returns lightweight problem references
+- POST `/api/library/preview`: `{id: "Problems/PUZ/PUZ001+1.p"}` loads one input
 
 
 ## Local TPTP library
 
 Set `ATP_TPTP_ROOT` to a local TPTP root containing `Problems/` and `Axioms/`, or create `data/library.json` with `{"root":"/path/to/TPTP-v9.3.0"}`. Restart the server after changing the path. Under WSL a Windows folder can be addressed as `/mnt/c/Users/shaun/OneDrive/Desktop/TPTP-v9.3.0`. The configured folder is read in place; it is not copied into the repository.
 
-Open **Test suite → TPTP library**, filter by filename/domain/language, select problems and click **Add selected**. Clear the smoke examples if you want a suite containing only imported problems. Importing does not start any provers. Expected SZS statuses come from TPTP headers; unrecognized expectations become Unknown. Language and domain filters describe the input, not which installed adapters support it. The full library is not a specific CASC competition selection.
+Open **Test suite → TPTP library**, filter by filename/domain/language, expand domain directories, select problems and click **Add selected**. Directory checkboxes select every `.p` file in the directory, across all pages and regardless of active filters; partially selected directories show an indeterminate checkbox. Selections survive collapsing directories or changing filters. The table header checkbox selects all library problems. A job can contain the entire selection; there is no 100-problem cap. Clear the smoke examples if you want a suite containing only imported problems. Importing does not start any provers. Expected SZS statuses come from TPTP headers; unrecognized expectations become Unknown. Language and domain filters describe the input, not which installed adapters support it. The full library is not a specific CASC competition selection.
 
-Imports expand recursive `include` directives and honor formula selections. Access is confined to the configured library, with cycle/depth/size checks. Problems plus source dependencies are limited to 1 MB each; a single import is limited to 8 MB and a suite to 100 problems. Larger benchmarks need a later batch/streaming workflow. Edited input loses its source label. Saved batches retain the expanded input, original source label and an SHA-256 hash in their manifest, so later changes to the source library do not alter an existing run. Proof/model acceptance remains unvalidated.
+Selections add lightweight library references rather than copying expanded inputs into the browser. A single job can run the full library. The worker loads **one problem at a time**, reads its expected status and expands recursive `include` directives (including formula selections), snapshots the exact input and SHA-256 hash, runs every selected prover, then moves on. Unreadable, unsupported or oversized inputs produce InputError rows and do not stop the rest of the job. Imports and previews do not start provers.
+
+The input expansion budget is 64 MiB per library problem including source dependencies. This is a per-input memory bound, not a job-size limit. Custom uploads remain self-contained and limited to 1 MiB per file, with a 12 MiB request limit. Access stays confined to the configured library with cycle/depth checks. Since library input is read on demand, edits to a source file before the worker reaches it affect that execution; the saved snapshot records exactly what was used. Use an unchanged versioned library for comparison runs. Preview library inputs on demand; converting a preview to a custom editable copy removes its library reference.
+
+New jobs keep lightweight descriptors in `data/runs/<id>/batch.json`, append and flush each result to `results.jsonl`, and store expanded problem snapshots in `inputs/<index>.json` plus hashes/source metadata in `inputs.jsonl`. Progress requests omit the full problem list and return at most 100 result rows with whole-job standings and a sampled performance profile. The suite editor displays 20 problem descriptors per page. Full CSV and JSON exports include every recorded execution, regardless of the visible page; JSON also includes the input snapshot index. Individual input snapshots are available through `GET /api/batches/{id}/input/{index}`. Old saved runs are still readable. After a server interruption, completed journal records are recovered and the job is marked interrupted; automatic resume is not implemented. Cancellation stops the current process group and leaves completed records available. Proof/model acceptance remains unvalidated.
+
+For isolated local checks, `ATP_PORT` overrides the listening port and `ATP_STORAGE_ROOT` changes the parent of `data/runs` without changing the library configuration or web assets. Defaults remain port 7878 and the repository directory. Do not point two server instances at the same run-storage root.
+
+While a job is running, the interface shows the worker-reported current problem, prover, problem/execution positions and elapsed wall time. The live card distinguishes input preparation, prover execution and result saving; it updates from the API every two seconds. `batch.current_execution` is transient and becomes null when the job stops, so restarting the server never restores a stale active problem.
+
+## Optional SUPr adapter
+
+Install SigmaKEE's `sumo` CLI in the WSL/Linux environment that runs the backend. At startup ATPWorkbench searches its PATH, falling back to `~/.sigmakee/bin/sumo`, and probes `sumo --version` and `sumo casc --help` with a bounded timeout. Missing, non-executable or incompatible installations stay unavailable in the registry. Restart the backend after installing or replacing sumo; the Sigma repository is not required at runtime.
+
+SUPr is invoked once per problem with `sumo --no-config --no-db casc <file> --timeout <seconds> --jobs 1 --quiet`. `SIGMA_CORES=1` requests one native strategy core; `--jobs 1` independently limits concurrent problem jobs. Sigma config/database loading and the CLI update notice/check are disabled, and ATPWorkbench supplies its self-contained input snapshot. Existing process-group cancellation, CPU/wall limits, log capture and measurement apply. The detected full CLI version (including commit when reported), executable, arguments and adapter environment are recorded in the run manifest. This is an installed-CLI adapter, not a claim of exact CASC catalogue reproduction.

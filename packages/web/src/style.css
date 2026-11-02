@@ -214,3 +214,42 @@ footer { display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; tex
 .library-message { padding: 0 20px; color: var(--ok); font-size: 13px; }
 .problem-source { font-size: 11px; overflow-wrap: anywhere; color: var(--muted); margin: 12px 0; }
 @media (max-width: 720px) { .library-filters { grid-template-columns: 1fr 1fr; } .library-filters label:first-child { grid-column: 1 / -1; } }
+
+.library-selection-help { padding: 0 20px 16px; font-size: 12px; }
+.library-tree { max-height: 560px; overflow: auto; }
+.library-tree thead { position: sticky; top: 0; z-index: 1; background: var(--card); }
+.library-tree th:first-child { width: 68px; }
+.directory-row { background: color-mix(in srgb, var(--accent) 4%, var(--card)); }
+.directory-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-height: 32px; }
+.directory-toggle { padding: 2px 0; min-height: 30px; border: 0; background: transparent; color: var(--fg); gap: 8px; }
+.directory-toggle:hover { color: var(--accent); }
+.directory-chevron { width: 12px; font-size: 16px; }
+.directory-toggle svg { color: var(--accent); }
+.directory-selected { margin-left: auto; color: var(--accent); font-size: 12px; }
+.tree-problem-name { padding-left: 36px; }
+.directory-pagination button { min-height: 29px; padding: 4px 9px; font-size: 12px; }
+.library-limit { color: var(--warn); padding: 0 20px 12px; font-size: 12px; }
+
+.suite-pagination { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px; padding:10px; font-size:11px; color:var(--muted); }
+.suite-pagination button { min-height:28px; font-size:11px; padding:4px 6px; }
+.library-input-preview .actions { margin:12px 0; }
+
+.problem-list { max-height: 580px; overflow-y: auto; }
+.problem-list .suite-pagination { position: sticky; bottom: 0; background: var(--card); border-top: 1px solid var(--line); }
+.problem-list .suite-pagination button { display:inline-flex; width:auto; flex:0 0 auto; padding:4px 6px; min-height:28px; font-size:11px; background:var(--bg); border:1px solid var(--line); border-radius:5px; }
+
+.current-execution { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:16px; padding:16px; border-color:color-mix(in srgb,var(--accent) 50%,var(--line)); }
+.current-execution-main { min-width:0; flex:1; }
+.current-execution-heading { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:8px; }
+.current-execution-heading .dot { margin-right:0; }
+.current-execution-heading .muted { margin-left:6px; font-size:11px; }
+.current-execution-problem { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
+.current-execution-problem > strong { font:600 16px var(--mono); overflow-wrap:anywhere; }
+.current-execution-prover { font-size:12px; color:var(--accent); background:color-mix(in srgb,var(--accent) 10%,var(--bg)); padding:3px 9px; border-radius:5px; }
+.current-execution-position { margin-top:7px; font-size:12px; }
+.current-execution-time { display:flex; flex-direction:column; gap:3px; min-width:115px; }
+.current-execution-time strong { font:600 23px var(--mono); font-variant-numeric:tabular-nums; }
+
+svg.performance-chart text { font-size: 15px; fill: var(--fg); }
+svg.performance-chart text.axis-title { font-size: 16px; font-weight: 500; }
+.analysis-grid .legend { font-size: 13px; }
