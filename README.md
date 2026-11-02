@@ -1,6 +1,6 @@
 # ATPWorkbench
 
-A local workbench for automated theorem proving. ProverBench runs test suites
+A workbench for automated theorem proving. ProverBench runs test suites
 against native local ATP processes and records reproducible results.
 
 ## Start
